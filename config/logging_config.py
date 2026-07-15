@@ -1,46 +1,75 @@
-"""Logging configuration for JARVIS."""
+"""
+jarvis/config/logging_config.py
+
+Compatibility shim for logging initialisation.
+
+The canonical logging implementation lives in ``utils/logger.py``,
+which sets up the colourised console handler, the rotating file
+handler, and the "jarvis" namespace logger with full idempotency
+protection.
+
+This file exists because ``config/`` is the natural first place
+anyone looks for logging configuration. Rather than duplicating
+logic here (which would produce double handlers, conflicting log
+levels, and duplicate console output), this module simply maps
+its own public API to the canonical implementation.
+
+Rule: ALL logging logic lives in utils/logger.py.
+      This file ONLY delegates — it contains zero handler setup,
+      zero formatter definitions, and zero logger instantiation.
+
+Usage (the only correct call site is main.py):
+    from jarvis.config.logging_config import setup_logging
+    setup_logging(log_level="DEBUG", log_dir="jarvis/logs")
+
+Do NOT call both setup_logging() and configure_logging() in the
+same process. Use one or the other; they resolve to the same
+underlying call and the idempotency guard in configure_logging()
+will silently no-op the second invocation anyway, but calling
+both is a code smell that signals confusion about ownership.
+"""
+
+from __future__ import annotations
 
 import logging
-import logging.handlers
-import os
 from pathlib import Path
 
+from utils.logger import configure_logging
 
-def setup_logging(log_level: str = "INFO", log_dir: str = "logs") -> None:
-    """
-    Configure logging for JARVIS.
-    
+__all__ = ["setup_logging"]
+
+
+def setup_logging(
+    log_level: str = "INFO",
+    log_dir: str = "jarvis/logs",
+) -> None:
+    """Configure JARVIS logging by delegating to utils/logger.py.
+
+    This is a convenience wrapper that accepts the string-based
+    level names used in settings.yaml and converts them to the
+    integer constants expected by ``configure_logging()``.
+
     Args:
-        log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-        log_dir: Directory for log files
+        log_level: String log level name applied to both the console
+            and file handlers. One of: DEBUG | INFO | WARNING |
+            ERROR | CRITICAL. Defaults to "INFO".
+        log_dir: Directory path (relative to CWD or absolute) where
+            ``jarvis.log`` will be written. Created automatically if
+            it does not exist. Defaults to "jarvis/logs".
+
+    Raises:
+        ValueError: If ``log_level`` is not a recognised level name.
     """
-    log_path = Path(log_dir)
-    log_path.mkdir(exist_ok=True)
+    numeric_level = getattr(logging, log_level.upper(), None)
+    if not isinstance(numeric_level, int):
+        raise ValueError(
+            f"Invalid log level: {log_level!r}. "
+            f"Must be one of: DEBUG, INFO, WARNING, ERROR, CRITICAL."
+        )
 
-    # Create formatters
-    file_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
+    configure_logging(
+        log_dir=Path(log_dir),
+        console_level=numeric_level,
+        file_level=numeric_level,
+        root_level=numeric_level,
     )
-    console_formatter = logging.Formatter(
-        "%(asctime)s - %(levelname)s - %(message)s",
-        datefmt="%H:%M:%S"
-    )
-
-    # Root logger configuration
-    root_logger = logging.getLogger()
-    root_logger.setLevel(getattr(logging, log_level.upper()))
-
-    # File handler with rotation
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_path / "jarvis.log",
-        maxBytes=10 * 1024 * 1024,  # 10MB
-        backupCount=5
-    )
-    file_handler.setFormatter(file_formatter)
-    root_logger.addHandler(file_handler)
-
-    # Console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(console_formatter)
-    root_logger.addHandler(console_handler)
