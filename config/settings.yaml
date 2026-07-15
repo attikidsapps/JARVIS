@@ -1,0 +1,300 @@
+# =============================================================================
+# JARVIS AI Assistant — Master Configuration
+# File: config/settings.yaml
+#
+# This file is the single source of truth for all runtime configuration.
+# Environment variable overrides are supported for sensitive values via .env
+# Loaded by: utils/config_loader.py
+# Referenced by: every module in the project
+#
+# DO NOT commit secrets here. Use .env for API keys, passwords, tokens.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# Application
+# -----------------------------------------------------------------------------
+app:
+  name: "JARVIS"
+  version: "0.1.0"
+  environment: "development"       # development | production
+  debug: false
+  log_level: "INFO"                # DEBUG | INFO | WARNING | ERROR | CRITICAL
+
+
+# -----------------------------------------------------------------------------
+# AI / LLM — Ollama + dolphin-llama3
+# -----------------------------------------------------------------------------
+ai:
+  provider: "ollama"
+  model: "dolphin-llama3"
+  base_url: "http://localhost:11434"
+
+  # Generation parameters
+  temperature: 0.7                 # 0.0 = deterministic, 1.0 = creative
+  top_p: 0.9
+  top_k: 40
+  repeat_penalty: 1.1
+  max_tokens: 1024                 # Max tokens per LLM response
+
+  # Context window management
+  context_window: 8192             # dolphin-llama3 context limit (tokens)
+  context_reserve: 1024            # Tokens reserved for the response
+  # Effective history budget = context_window - context_reserve - system_prompt_tokens
+
+  # Request behaviour
+  stream: true                     # Stream tokens as they are generated
+  request_timeout: 120             # Seconds before an LLM request times out
+  retry_attempts: 3
+  retry_delay: 2.0                 # Seconds between retries
+
+
+# -----------------------------------------------------------------------------
+# Personality / Persona
+# Referenced by: ai/personality.py
+# -----------------------------------------------------------------------------
+personality:
+  name: "JARVIS"
+  voice_name: "J.A.R.V.I.S"       # Used in self-references within responses
+
+  # Tone controls passed as instructions in the system prompt
+  tone:
+    professional: true
+    concise: true
+    admit_uncertainty: true
+    avoid_fabrication: true
+
+  # Hard limits on response style
+  max_response_sentences: 6        # Soft cap; LLM is instructed to respect this
+  use_affirmations: false          # Suppress "Certainly!", "Of course!" etc.
+
+
+# -----------------------------------------------------------------------------
+# Audio — Wake Word Detection
+# Referenced by: audio/wake_word.py
+# -----------------------------------------------------------------------------
+wake_word:
+  enabled: true
+  model: "hey jarvis"              # openWakeWord model identifier
+  threshold: 0.5                   # Detection confidence threshold (0.0–1.0)
+  # Lower = more sensitive (more false positives)
+  # Higher = less sensitive (may miss activations)
+
+  chunk_size: 1280                 # Audio frames per processing chunk
+  # openWakeWord requires exactly 1280 frames at 16kHz
+  sample_rate: 16000               # Hz — must match openWakeWord expectation
+  channels: 1                      # Mono
+
+  cooldown_seconds: 1.5            # Minimum seconds between wake word triggers
+  vad_threshold: 0.0               # Voice activity detection threshold (0 = disabled)
+
+
+# -----------------------------------------------------------------------------
+# Audio — Speech Recognition (faster-whisper, offline)
+# Referenced by: audio/speech_recognition.py
+# -----------------------------------------------------------------------------
+speech_recognition:
+  model_size: "base.en"            # tiny.en | base.en | small.en | medium.en | large-v3
+  # base.en is the recommended balance of speed and accuracy for English-only
+  # Use large-v3 if accuracy is critical and GPU is available
+
+  device: "cpu"                    # cpu | cuda
+  compute_type: "int8"             # int8 (CPU-optimised) | float16 (GPU)
+
+  language: "en"
+  beam_size: 5
+  vad_filter: true                 # Filter non-speech segments before transcription
+  vad_threshold: 0.5
+
+  # Recording behaviour
+  silence_threshold: 500           # RMS amplitude below which audio is "silence"
+  silence_duration: 1.5            # Seconds of silence that ends a recording
+  max_recording_duration: 30.0     # Hard cap on a single voice input (seconds)
+  sample_rate: 16000
+  channels: 1
+  chunk_size: 1024
+
+
+# -----------------------------------------------------------------------------
+# Audio — Text-to-Speech (pyttsx3 / Windows SAPI5, offline)
+# Referenced by: audio/text_to_speech.py
+# -----------------------------------------------------------------------------
+text_to_speech:
+  engine: "sapi5"                  # sapi5 (Windows) — pyttsx3 backend
+  rate: 185                        # Words per minute (default SAPI5 = 200)
+  volume: 0.95                     # 0.0–1.0
+  voice_index: 0                   # 0 = first installed voice; override if needed
+  # To list available voices, run:
+  #   python -c "import pyttsx3; e=pyttsx3.init(); [print(i,v.name) for i,v in enumerate(e.getProperty('voices'))]"
+
+  # Behaviour
+  block_on_speak: false            # If true, speak() blocks until audio finishes
+  interrupt_on_wake: true          # Stop speaking immediately on wake word
+
+
+# -----------------------------------------------------------------------------
+# Audio — Device Selection
+# Used by wake word and speech recognition modules
+# -----------------------------------------------------------------------------
+audio:
+  input_device_index: null         # null = system default mic; set integer to override
+  output_device_index: null        # null = system default speaker
+  # To list devices, run:
+  #   python -c "import sounddevice as sd; print(sd.query_devices())"
+
+
+# -----------------------------------------------------------------------------
+# Core Pipeline
+# Referenced by: core/orchestrator.py, core/planner.py
+# -----------------------------------------------------------------------------
+core:
+  # Orchestrator
+  pipeline_timeout: 60.0           # Max seconds for a full request→response cycle
+
+  # Conversation manager
+  max_conversation_turns: 20       # Turns kept in short-term memory per session
+  session_timeout_minutes: 30      # Inactive session is cleared after this
+
+  # Planner
+  planning_enabled: true           # If false, requests go directly to LLM (no planning)
+  max_plan_steps: 10               # Hard cap on steps the planner can produce
+  planning_model: "dolphin-llama3" # Can differ from chat model if needed
+
+  # Tool selector
+  tool_confidence_threshold: 0.6   # Minimum confidence to invoke a tool vs. chat
+  fallback_to_chat: true           # If no tool matches, respond conversationally
+
+
+# -----------------------------------------------------------------------------
+# Automation
+# Referenced by: automation/*.py
+# -----------------------------------------------------------------------------
+automation:
+  # Safety
+  require_confirmation_for_destructive: true   # Prompt user before delete/overwrite
+  destructive_actions:                          # Actions that require confirmation
+    - "delete_file"
+    - "delete_directory"
+    - "send_email"
+    - "empty_recycle_bin"
+    - "kill_process"
+
+  # File manager
+  file_manager:
+    allowed_roots:                 # JARVIS will only operate within these directories
+      - "%USERPROFILE%"            # Expands to C:\Users\<username>
+      - "%PUBLIC%"
+    blocked_extensions:            # Never touch these file types
+      - ".exe"
+      - ".dll"
+      - ".sys"
+      - ".bat"
+      - ".ps1"
+    max_file_size_mb: 100          # Refuse to read files larger than this
+
+  # Browser automation
+  browser:
+    browser_type: "chromium"       # chromium | firefox | webkit (Playwright)
+    headless: false                # true = no visible browser window
+    default_timeout_ms: 30000      # Playwright default timeout
+    slow_mo_ms: 0                  # Add delay between actions (useful for debugging)
+    user_data_dir: null            # null = fresh profile; set path to persist session
+
+  # Mouse / keyboard
+  mouse_keyboard:
+    failsafe: true                 # pyautogui failsafe: move mouse to corner to abort
+    pause_between_actions: 0.05    # Seconds between pyautogui actions
+    typing_interval: 0.02          # Seconds between keystrokes when typing
+
+
+# -----------------------------------------------------------------------------
+# Memory
+# Referenced by: memory/short_term.py, memory/long_term.py
+# -----------------------------------------------------------------------------
+memory:
+  # Short-term (in-process, lost on restart)
+  short_term:
+    max_entries: 100               # Maximum items held in short-term store
+    ttl_seconds: 1800              # Items expire after 30 minutes of inactivity
+
+  # Long-term (SQLite-backed, persists across restarts)
+  long_term:
+    enabled: true
+    max_facts: 10000               # Maximum stored facts before oldest are pruned
+    similarity_threshold: 0.75     # Minimum relevance score for memory retrieval
+    retrieval_limit: 10            # Max facts injected into context per turn
+
+
+# -----------------------------------------------------------------------------
+# Database — SQLite
+# Referenced by: database/db_manager.py, database/models.py
+# -----------------------------------------------------------------------------
+database:
+  engine: "sqlite"
+  path: "data/jarvis.db"           # Relative to project root
+  echo: false                      # SQLAlchemy query logging (set true to debug SQL)
+  pool_size: 5
+  check_same_thread: false         # Required for SQLite in multi-threaded use
+
+
+# -----------------------------------------------------------------------------
+# Security
+# Referenced by: security/permissions.py, security/validators.py
+# -----------------------------------------------------------------------------
+security:
+  # Permission system
+  require_confirmation: true       # Master switch — set false only for development
+  confirmation_timeout: 30         # Seconds user has to confirm a destructive action
+
+  # Input validation
+  max_input_length: 2000           # Characters; inputs longer than this are rejected
+  sanitise_inputs: true
+
+  # Sensitive action categories that always require explicit confirmation
+  protected_categories:
+    - "file_deletion"
+    - "email_send"
+    - "system_shutdown"
+    - "process_termination"
+    - "external_network_request"
+
+
+# -----------------------------------------------------------------------------
+# Logging
+# Referenced by: utils/logger.py
+# Full handler config lives in config/logging_config.py
+# -----------------------------------------------------------------------------
+logging:
+  level: "INFO"
+  log_dir: "logs"
+  log_file: "jarvis.log"
+  max_bytes: 10485760              # 10 MB per log file
+  backup_count: 5                  # Number of rotated log files to keep
+  format: "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+  date_format: "%Y-%m-%d %H:%M:%S"
+  console_output: true             # Also print logs to terminal
+
+
+# -----------------------------------------------------------------------------
+# Scheduler — APScheduler
+# Referenced by: core/scheduler.py (to be built)
+# -----------------------------------------------------------------------------
+scheduler:
+  enabled: true
+  timezone: "America/New_York"     # IANA timezone string — update to your local zone
+  job_store: "sqlite"              # sqlite | memory
+  job_store_path: "data/scheduler.db"
+  max_instances: 3                 # Max concurrent instances of any single job
+  coalesce: true                   # Merge missed executions into one
+
+
+# -----------------------------------------------------------------------------
+# Web Search — DuckDuckGo (no API key required)
+# Referenced by: tools/web_search_tool.py (to be built)
+# -----------------------------------------------------------------------------
+web_search:
+  provider: "duckduckgo"
+  max_results: 5
+  region: "us-en"
+  safe_search: "moderate"          # off | moderate | strict
+  timeout: 10                      # Request timeout in seconds

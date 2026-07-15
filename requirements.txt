@@ -1,0 +1,217 @@
+# =============================================================================
+# JARVIS AI Assistant — Python Dependencies
+# Target: Python 3.12+ | Platform: Windows 10/11
+# All packages verified against PyPI as of 2025-07
+#
+# Install: pip install -r requirements.txt
+# After install: playwright install chromium
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# AI / LLM
+# -----------------------------------------------------------------------------
+
+# Ollama Python client — wraps the local Ollama REST API (dolphin-llama3)
+ollama==0.6.2
+
+
+# -----------------------------------------------------------------------------
+# Voice — Wake Word Detection
+# -----------------------------------------------------------------------------
+
+# Fully local wake word engine; no API key or account required
+openWakeWord==0.6.0
+
+# openWakeWord runtime dependency (ONNX model inference)
+onnxruntime==1.22.0
+
+
+# -----------------------------------------------------------------------------
+# Voice — Speech Recognition (offline, no API key)
+# -----------------------------------------------------------------------------
+
+# CTranslate2-optimised Whisper — faster than openai-whisper, fully offline
+faster-whisper==1.2.1
+
+
+# -----------------------------------------------------------------------------
+# Voice — Text-to-Speech (uses Windows SAPI5 natively, zero cost)
+# -----------------------------------------------------------------------------
+
+pyttsx3==2.99
+
+
+# -----------------------------------------------------------------------------
+# Audio I/O
+# -----------------------------------------------------------------------------
+
+# Low-level audio capture/playback (used by openWakeWord and faster-whisper)
+pyaudio==0.2.14
+
+# Higher-level audio I/O; used for audio stream management
+sounddevice==0.5.5
+
+# Audio file read/write (WAV, FLAC, OGG)
+soundfile==0.14.0
+
+# Numerical audio processing
+numpy==2.2.6
+
+# Signal processing (audio filtering, resampling)
+scipy==1.15.3
+
+
+# -----------------------------------------------------------------------------
+# Desktop Automation — Mouse / Keyboard / Screen
+# -----------------------------------------------------------------------------
+
+# Cross-platform GUI automation (mouse, keyboard, screenshots)
+pyautogui==0.9.54
+
+# Low-level keyboard hook and hotkey support (Windows)
+keyboard==0.13.5
+
+# Low-level mouse hook support (Windows)
+mouse==0.7.1
+
+# Window management: find, move, resize, focus application windows
+pygetwindow==0.0.9
+
+# Clipboard read/write
+pyperclip==1.11.0
+
+# Fast multi-monitor screen capture
+mss==10.2.0
+
+# Image processing (screenshot analysis, screen parsing)
+Pillow==12.1.0
+
+
+# -----------------------------------------------------------------------------
+# Desktop Automation — Windows-Specific APIs
+# pywin32 note: the PyPI package name is 'pywin32'; it provides win32api,
+# win32con, win32gui, win32com etc. at import time.
+# Install separately if pip resolution fails:
+#   pip install pywin32
+# then run: python Scripts/pywin32_postinstall.py -install
+# -----------------------------------------------------------------------------
+
+pywin32==308
+
+# COM automation support (used alongside pywin32 for COM object interaction)
+comtypes==1.4.16
+
+
+# -----------------------------------------------------------------------------
+# Browser Automation
+# -----------------------------------------------------------------------------
+
+# Playwright async browser automation — supports Chromium (free, no key)
+# After install run: playwright install chromium
+playwright==1.50.0
+
+
+# -----------------------------------------------------------------------------
+# Web Search (no API key — uses DuckDuckGo scraping)
+# -----------------------------------------------------------------------------
+
+duckduckgo-search==8.1.1
+
+# HTML parsing for web search result extraction
+beautifulsoup4==4.15.0
+lxml==6.0.0
+
+
+# -----------------------------------------------------------------------------
+# HTTP Client
+# -----------------------------------------------------------------------------
+
+# Async-first HTTP client; used by Ollama client and web modules
+httpx==0.28.1
+
+# Async HTTP framework; used for any internal async service calls
+aiohttp==3.11.18
+
+
+# -----------------------------------------------------------------------------
+# Process & System Monitoring
+# -----------------------------------------------------------------------------
+
+# Cross-platform process and system resource inspection
+psutil==7.1.0
+
+
+# -----------------------------------------------------------------------------
+# Task Scheduling (reminders, deferred execution)
+# -----------------------------------------------------------------------------
+
+# In-process job scheduler; supports cron, interval, and date triggers
+APScheduler==3.11.3
+
+
+# -----------------------------------------------------------------------------
+# Data Validation & Configuration
+# -----------------------------------------------------------------------------
+
+# Runtime data validation with Python type hints (used in tool schemas)
+pydantic==2.11.4
+
+# .env file loading for configuration management
+python-dotenv==1.1.0
+
+
+# -----------------------------------------------------------------------------
+# Database (SQLite — stdlib engine, zero cost, zero server)
+# SQLite3 is bundled with Python; no pip install needed.
+# The packages below provide the ORM and migration layer.
+# -----------------------------------------------------------------------------
+
+# Lightweight ORM; maps Python classes to SQLite tables
+SQLAlchemy==2.0.41
+
+# Schema migration tool (works with SQLAlchemy)
+alembic==1.15.2
+
+
+# -----------------------------------------------------------------------------
+# Security
+# -----------------------------------------------------------------------------
+
+# Cryptographic primitives — used for permission token signing and data
+# encryption at rest in the database layer
+cryptography==44.0.0
+
+
+# -----------------------------------------------------------------------------
+# Utilities
+# -----------------------------------------------------------------------------
+
+# Rich terminal output (structured logs, progress bars, tracebacks)
+rich==14.0.0
+
+# Structured logging with context binding
+structlog==25.4.0
+
+# Typed dataclasses with JSON serialisation helpers
+dacite==1.8.1
+
+# Date/time parsing and manipulation
+python-dateutil==2.9.0.post0
+
+
+# -----------------------------------------------------------------------------
+# Testing
+# -----------------------------------------------------------------------------
+
+# Test framework
+pytest==8.3.5
+
+# Async test support
+pytest-asyncio==0.25.3
+
+# Mocking library (supplements unittest.mock)
+pytest-mock==3.14.0
+
+# Code coverage reporting
+pytest-cov==6.1.0
