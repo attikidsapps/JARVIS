@@ -3,36 +3,34 @@ jarvis/utils/config_loader.py
 
 Typed, validated settings loader for JARVIS.
 
-Loads ``jarvis/config/settings.yaml`` once at startup, merges any
+Loads ``config/settings.yaml`` once at startup, merges any
 environment-variable overrides, and exposes the fully-resolved
-configuration as a frozen, attribute-accessible ``Settings`` object.
-Every subsystem receives a typed sub-config (e.g. ``LLMSettings``)
-rather than raw dicts, so attribute access is IDE-friendly and typos
-in key names fail loudly at startup rather than silently at runtime.
+configuration as a typed ``Settings`` object. Every subsystem receives
+a typed sub-config (e.g. ``DatabaseSettings``) rather than raw dicts,
+so attribute access is IDE-friendly and typos in key names fail loudly
+at startup rather than silently at runtime.
 
 Override mechanism:
-    Environment variables in the shell (or from the .env file, loaded
-    by python-dotenv in main.py) can override any YAML key by following
-    the naming convention:
+    Environment variables (from the shell or .env, loaded by
+    python-dotenv in main.py) can override any YAML key using:
 
         JARVIS__<SECTION>__<KEY>=value
 
     Examples:
         JARVIS__LLM__MODEL=llama3          overrides llm.model
-        JARVIS__LOGGING__CONSOLE_LEVEL=INFO overrides logging.console_level
         JARVIS__DATABASE__PATH=/tmp/j.db   overrides database.path
 
     Values are coerced to the declared Python type of the target field.
     Boolean coercion treats "true"/"1"/"yes" as True (case-insensitive).
 
-Design goals:
-    - Single source of truth: settings.yaml is the canonical config;
-      .env overrides are surgical and environment-specific.
-    - Fail-fast validation: missing required fields and type mismatches
-      raise ``ConfigurationError`` at startup before any subsystem init.
-    - Zero magic: every field is explicitly declared with its type and
-      a sensible default, so the config surface is fully discoverable
-      by reading this file.
+NOTE: This file intentionally does NOT use `from __future__ import
+annotations`. That import activates PEP 563 lazy annotation evaluation,
+which converts all annotations to strings at runtime. _populate_dataclass
+relies on runtime type inspection via typing.get_type_hints(), which
+re-resolves those strings — but only if the necessary names are in scope
+at resolution time. To avoid that complexity and keep the implementation
+straightforward, lazy annotations are disabled here. There are no forward
+references in this file that would require them.
 
 Dependencies:
     pyyaml   -- parses the YAML config file
@@ -40,13 +38,15 @@ Dependencies:
                      this module is imported
 """
 
-from __future__ import annotations
+# NOTE: No `from __future__ import annotations` here — see module docstring.
 
+import dataclasses
 import logging
 import os
+import typing
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, Optional, Type, TypeVar
+from typing import Any, Optional, Type, TypeVar, Union, get_type_hints
 
 try:
     import yaml
@@ -78,7 +78,7 @@ __all__ = [
 
 logger = logging.getLogger("jarvis.utils.config_loader")
 
-_DEFAULT_CONFIG_PATH = Path("jarvis/config/settings.yaml")
+_DEFAULT_CONFIG_PATH = Path("config/settings.yaml")
 _ENV_PREFIX = "JARVIS"
 _ENV_SEPARATOR = "__"
 
@@ -159,7 +159,7 @@ class MemorySettings:
 
 @dataclass
 class DatabaseSettings:
-    path: str = "jarvis/data/jarvis.db"
+    path: str = "data/jarvis.db"
     timeout_seconds: int = 30
     wal_mode: bool = True
 
@@ -168,7 +168,7 @@ class DatabaseSettings:
 class PermissionsSettings:
     trust_window_seconds: int = 300
     confirmation_timeout_seconds: float = 60.0
-    audit_log_path: str = "jarvis/logs/permissions_audit.jsonl"
+    audit_log_path: str = "logs/permissions_audit.jsonl"
 
 
 @dataclass
@@ -179,7 +179,7 @@ class BrowserSettings:
 
 @dataclass
 class FileManagerSettings:
-    forbidden_paths: list[str] = field(default_factory=lambda: [
+    forbidden_paths: list = field(default_factory=lambda: [
         "C:\\Windows",
         "C:\\Windows\\System32",
         "C:\\Program Files",
@@ -205,7 +205,7 @@ class AutomationSettings:
 class LoggingSettings:
     console_level: str = "DEBUG"
     file_level: str = "DEBUG"
-    log_dir: str = "jarvis/logs"
+    log_dir: str = "logs"
 
 
 @dataclass
@@ -233,16 +233,36 @@ class Settings:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _coerce(value: Any, target_type: type) -> Any:
-    """Coerce a raw value (from YAML or env var string) to ``target_type``.
+def _unwrap_optional(tp: Any) -> tuple[bool, Any]:
+    """Return (is_optional, inner_type) for a type annotation.
 
-    Handles the common cases: bool, int, float, str, Optional[X].
-    Nested dataclasses are handled by ``_populate_dataclass`` and should
-    not be passed here directly.
+    Handles Optional[X] = Union[X, None] and bare types equally.
+    Works with real runtime type objects (not PEP-563 strings).
+    """
+    origin = getattr(tp, "__origin__", None)
+    args = getattr(tp, "__args__", ())
+
+    # Union[X, None]  (which is what Optional[X] desugars to)
+    if origin is Union and args:
+        non_none = [a for a in args if a is not type(None)]
+        if len(non_none) == 1:
+            return True, non_none[0]
+        # Union of multiple non-None types — rare in this codebase
+        return True, non_none[0] if non_none else (True, Any)
+
+    return False, tp
+
+
+def _coerce(value: Any, target_type: Any) -> Any:
+    """Coerce a raw value (from YAML or env-var string) to ``target_type``.
+
+    Handles bool, int, float, str, list, and Optional[X].
+    Nested dataclasses are handled by _populate_dataclass — do not
+    pass them here directly.
 
     Args:
         value: The raw value to coerce.
-        target_type: The Python type to coerce toward.
+        target_type: A real runtime type object (not a string annotation).
 
     Returns:
         The coerced value.
@@ -250,24 +270,24 @@ def _coerce(value: Any, target_type: type) -> Any:
     Raises:
         ConfigurationError: If coercion is not possible.
     """
-    # Unwrap Optional[X] to X (NoneType is always acceptable)
-    origin = getattr(target_type, "__origin__", None)
-    if origin is type(None):
-        return None
-
-    # Handle Optional[X] = Union[X, None]
-    args = getattr(target_type, "__args__", None)
-    if origin is type(None) or (args and type(None) in args):
-        # It's Optional[X]
-        inner_types = [a for a in args if a is not type(None)]
+    # Unwrap Optional[X] → X
+    is_opt, inner = _unwrap_optional(target_type)
+    if is_opt:
         if value is None:
             return None
-        if inner_types:
-            return _coerce(value, inner_types[0])
-        return value
+        target_type = inner
 
     if value is None:
         return None
+
+    origin = getattr(target_type, "__origin__", None)
+
+    # list / list[str] / list[X]
+    if origin is list:
+        if isinstance(value, list):
+            return value
+        # env-var override: comma-separated string
+        return [item.strip() for item in str(value).split(",")]
 
     if target_type is bool:
         if isinstance(value, bool):
@@ -283,22 +303,22 @@ def _coerce(value: Any, target_type: type) -> Any:
     if target_type is str:
         return str(value)
 
-    # list[str] or list[X] — preserve as-is if already a list
-    if origin is list:
-        if isinstance(value, list):
-            return value
-        # env var override: comma-separated string
-        return [item.strip() for item in str(value).split(",")]
-
+    # Fallback: return as-is and let callers fail loudly if wrong
     return value
 
 
 def _populate_dataclass(cls: Type[T], data: dict[str, Any]) -> T:
     """Recursively populate a dataclass from a dict.
 
-    Fields whose names are not present in ``data`` retain their
-    default values. Fields whose declared type is itself a dataclass
-    are recursively populated from the corresponding nested dict.
+    Uses typing.get_type_hints() to resolve annotations to real type
+    objects at runtime. This is safe because this module does NOT use
+    `from __future__ import annotations`, so annotations are already
+    real type objects — get_type_hints() is used as an extra safety
+    layer that would also work if the import were re-added later.
+
+    Fields absent from ``data`` retain their dataclass defaults.
+    Fields whose declared type is itself a dataclass are recursively
+    populated from the corresponding nested dict.
 
     Args:
         cls: The dataclass type to instantiate.
@@ -308,43 +328,45 @@ def _populate_dataclass(cls: Type[T], data: dict[str, Any]) -> T:
         A fully populated instance of ``cls``.
 
     Raises:
-        ConfigurationError: If a field value cannot be coerced to its
-            declared type.
+        ConfigurationError: If a field value cannot be coerced.
     """
-    import dataclasses
-
     if not dataclasses.is_dataclass(cls):
-        raise ConfigurationError(f"_populate_dataclass called on non-dataclass: {cls}")
+        raise ConfigurationError(
+            f"_populate_dataclass called on non-dataclass: {cls}"
+        )
+
+    # Resolve all annotations to real type objects.
+    # include_extras=False strips Annotated[...] wrappers if present.
+    try:
+        hints = get_type_hints(cls)
+    except Exception as exc:
+        raise ConfigurationError(
+            f"Could not resolve type hints for {cls.__name__}: {exc}"
+        ) from exc
 
     kwargs: dict[str, Any] = {}
+
     for f in fields(cls):  # type: ignore[arg-type]
         raw_value = data.get(f.name)
 
-        # Determine effective type, stripping Optional wrapper for isinstance checks
-        field_type = f.type if not isinstance(f.type, str) else cls.__annotations__.get(f.name, str)
+        # Get the resolved runtime type for this field.
+        field_type = hints.get(f.name, Any)
 
-        # If the field type is itself a dataclass, recurse.
-        actual_type = field_type
-        # Unwrap Optional[X]
-        origin = getattr(field_type, "__origin__", None)
-        type_args = getattr(field_type, "__args__", ())
-        if origin is not None and type_args:
-            non_none = [a for a in type_args if a is not type(None)]
-            if non_none:
-                actual_type = non_none[0]
+        # Unwrap Optional to get the inner type for the is_dataclass check.
+        _, inner_type = _unwrap_optional(field_type)
 
-        import dataclasses as _dc
-        if raw_value is not None and _dc.is_dataclass(actual_type) and isinstance(raw_value, dict):
-            kwargs[f.name] = _populate_dataclass(actual_type, raw_value)
+        if raw_value is not None and dataclasses.is_dataclass(inner_type) and isinstance(raw_value, dict):
+            # Recursively hydrate nested dataclasses.
+            kwargs[f.name] = _populate_dataclass(inner_type, raw_value)  # type: ignore[arg-type]
         elif raw_value is not None:
             try:
                 kwargs[f.name] = _coerce(raw_value, field_type)
             except (ValueError, TypeError) as exc:
                 raise ConfigurationError(
-                    f"Cannot coerce config value '{raw_value!r}' for field "
+                    f"Cannot coerce config value {raw_value!r} for field "
                     f"'{cls.__name__}.{f.name}' to type {field_type}: {exc}"
                 ) from exc
-        # else: leave as dataclass default
+        # else: field absent from YAML — use dataclass default
 
     return cls(**kwargs)  # type: ignore[return-value]
 
@@ -352,15 +374,8 @@ def _populate_dataclass(cls: Type[T], data: dict[str, Any]) -> T:
 def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
     """Scan environment variables for JARVIS__<SECTION>__<KEY> overrides.
 
-    Mutates and returns ``raw`` in place with any found overrides.
-    Supports two-level nesting (section + key). Deeper nesting is not
-    supported via environment variables; use settings.yaml for that.
-
-    Args:
-        raw: The dict loaded from settings.yaml.
-
-    Returns:
-        The same dict, potentially mutated with env overrides.
+    Supports two-level (section.key) and three-level
+    (section.subsection.key) nesting. Mutates and returns ``raw``.
     """
     prefix = f"{_ENV_PREFIX}{_ENV_SEPARATOR}"
     for env_key, env_value in os.environ.items():
@@ -374,9 +389,13 @@ def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
             section, key = parts[0].lower(), parts[1].lower()
             if section in raw and isinstance(raw[section], dict):
                 raw[section][key] = env_value
-                logger.debug("Config override from env: %s.%s = %r", section, key, env_value)
+                logger.debug(
+                    "Config override from env: %s.%s = %r", section, key, env_value
+                )
         elif len(parts) == 3:
-            section, subsection, key = parts[0].lower(), parts[1].lower(), parts[2].lower()
+            section, subsection, key = (
+                parts[0].lower(), parts[1].lower(), parts[2].lower()
+            )
             if (
                 section in raw
                 and isinstance(raw[section], dict)
@@ -389,7 +408,9 @@ def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
                     section, subsection, key, env_value,
                 )
         else:
-            logger.warning("Ignoring unrecognised JARVIS env override: %s", env_key)
+            logger.warning(
+                "Ignoring unrecognised JARVIS env override: %s", env_key
+            )
 
     return raw
 
@@ -401,14 +422,9 @@ def _apply_env_overrides(raw: dict[str, Any]) -> dict[str, Any]:
 def load_settings(config_path: Optional[Path] = None) -> Settings:
     """Load, validate, and return the JARVIS settings.
 
-    The returned ``Settings`` object is the single configuration
-    authority for the entire process. Pass it by reference to
-    subsystem constructors rather than calling this function more
-    than once.
-
     Args:
         config_path: Path to the YAML config file. Defaults to
-            ``jarvis/config/settings.yaml`` relative to CWD.
+            ``config/settings.yaml`` relative to CWD.
 
     Returns:
         A fully populated and validated ``Settings`` instance.
@@ -423,7 +439,7 @@ def load_settings(config_path: Optional[Path] = None) -> Settings:
         raise ConfigurationError(
             f"Configuration file not found: {resolved_path.resolve()}\n"
             "Ensure you are running JARVIS from the project root directory "
-            "and that jarvis/config/settings.yaml exists."
+            "and that config/settings.yaml exists."
         )
 
     try:
@@ -483,19 +499,19 @@ def _validate(settings: Settings) -> None:
                 f"{label} must be one of {valid_log_levels}, got '{attr}'"
             )
 
-    if not (0.0 <= settings.wake_word.sensitivity <= 1.0):
+    if not 0.0 <= settings.wake_word.sensitivity <= 1.0:
         raise ConfigurationError(
             f"wake_word.sensitivity must be between 0.0 and 1.0, "
             f"got {settings.wake_word.sensitivity}"
         )
 
-    if not (0.0 <= settings.llm.temperature <= 1.0):
+    if not 0.0 <= settings.llm.temperature <= 1.0:
         raise ConfigurationError(
             f"llm.temperature must be between 0.0 and 1.0, "
             f"got {settings.llm.temperature}"
         )
 
-    if not (0.0 <= settings.text_to_speech.volume <= 1.0):
+    if not 0.0 <= settings.text_to_speech.volume <= 1.0:
         raise ConfigurationError(
             f"text_to_speech.volume must be between 0.0 and 1.0, "
             f"got {settings.text_to_speech.volume}"

@@ -31,7 +31,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 from enum import Enum, auto
 from pathlib import Path
 from threading import Lock
@@ -96,7 +96,7 @@ class PermissionRequest:
         metadata: Arbitrary contextual data (file paths, recipients,
             amounts, etc.) preserved for audit purposes. Must be
             JSON-serializable.
-        requested_at: UTC timestamp of when the request was created.
+        requested_at: UTC-aware timestamp of when the request was created.
         request_id: Unique identifier for correlating logs.
     """
 
@@ -104,7 +104,10 @@ class PermissionRequest:
     description: str
     risk_level: RiskLevel
     metadata: dict = field(default_factory=dict)
-    requested_at: datetime = field(default_factory=datetime.utcnow)
+    # FIX [WARNING 1]: use timezone-aware datetime to match the rest of the
+    # codebase. datetime.utcnow() produces a naive datetime; appending "Z"
+    # to its isoformat() is technically incorrect ISO-8601.
+    requested_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
@@ -136,7 +139,9 @@ class PermissionManager:
     intentional fail-closed default for headless/unattended contexts.
     """
 
-    #: Actions below this risk level never require confirmation or trust.
+    #: Only RiskLevel.SAFE (value=0) is below this threshold. SAFE actions
+    #: are auto-approved without any confirmation prompt or trust-window check.
+    #: LOW and above always go through the confirmation path.
     ALWAYS_ALLOW_BELOW: RiskLevel = RiskLevel.LOW
 
     #: Actions at or above this risk level ALWAYS require fresh
@@ -155,10 +160,18 @@ class PermissionManager:
         Args:
             confirmation_callback: Function invoked to ask the user
                 to approve a MEDIUM/HIGH risk action. Must return
-                bool. Called synchronously; the caller is responsible
-                for enforcing its own timeout behavior if it blocks
-                on voice/UI input. If it raises, the request is
-                treated as denied.
+                bool. Called synchronously on the calling thread.
+
+                IMPORTANT — timeout behaviour: PermissionManager
+                measures how long the callback takes after it returns.
+                If the elapsed time exceeds confirmation_timeout_seconds,
+                the decision is recorded as TIMED_OUT. This check is
+                post-hoc; it does not interrupt a blocking callback.
+                The callback itself is responsible for enforcing any
+                real-time timeout (e.g. via a threading.Timer that
+                closes a dialog). If the callback raises, the request
+                is treated as DENIED.
+
             audit_log_path: Path to a JSONL file where every decision
                 is appended. Defaults to jarvis/logs/permissions_audit.jsonl
                 relative to the current working directory.
@@ -166,12 +179,8 @@ class PermissionManager:
                 action's approval is remembered for that exact action
                 signature before requiring re-confirmation. Set to 0
                 to disable trust windows entirely.
-            confirmation_timeout_seconds: Maximum time to wait on the
-                confirmation callback before treating the request as
-                timed out (and therefore denied). This is advisory --
-                enforcement of the actual timeout is the callback's
-                responsibility since PermissionManager does not spawn
-                threads to interrupt a blocking callback.
+            confirmation_timeout_seconds: Advisory timeout (seconds).
+                See confirmation_callback note above.
         """
         self._registry: dict[str, RiskLevel] = {}
         self._confirmation_callback = confirmation_callback
@@ -190,13 +199,7 @@ class PermissionManager:
     # ------------------------------------------------------------------
 
     def _register_default_actions(self) -> None:
-        """Seed the registry with the baseline JARVIS action set.
-
-        Automation modules should still call `register_action` for
-        any action not covered here, but this gives sane defaults out
-        of the box so the system fails closed rather than raising
-        KeyError on every unclassified call.
-        """
+        """Seed the registry with the baseline JARVIS action set."""
         defaults: dict[str, RiskLevel] = {
             # Application control
             "app.launch": RiskLevel.LOW,
@@ -240,12 +243,7 @@ class PermissionManager:
         self._registry.update(defaults)
 
     def register_action(self, action: str, risk_level: RiskLevel) -> None:
-        """Register or override the risk classification for an action.
-
-        Args:
-            action: Machine-readable action identifier (e.g. "file.delete").
-            risk_level: The RiskLevel to associate with this action.
-        """
+        """Register or override the risk classification for an action."""
         with self._lock:
             previous = self._registry.get(action)
             self._registry[action] = risk_level
@@ -258,9 +256,7 @@ class PermissionManager:
     def get_risk_level(self, action: str) -> RiskLevel:
         """Return the risk level for an action.
 
-        Unregistered actions are treated as CRITICAL by default
-        (fail closed) rather than raising, so a typo in an action
-        name cannot accidentally bypass authorization.
+        Unregistered actions default to CRITICAL (fail closed).
         """
         return self._registry.get(action, RiskLevel.CRITICAL)
 
@@ -275,9 +271,6 @@ class PermissionManager:
         metadata: Optional[dict] = None,
     ) -> PermissionRequest:
         """Authorize an action, raising PermissionDeniedError if refused.
-
-        This is the primary entry point automation modules should call
-        immediately before performing any state-changing operation.
 
         Args:
             action: Registered action identifier, e.g. "file.delete".
@@ -305,11 +298,11 @@ class PermissionManager:
             metadata=self._sanitize_metadata(metadata or {}),
         )
 
-        # SAFE / LOW risk actions below the always-allow threshold
-        # proceed without confirmation or logging overhead beyond an
-        # audit trail entry.
+        # FIX [WARNING 2]: Only RiskLevel.SAFE (value=0) passes this check.
+        # LOW actions (value=1) are NOT auto-approved; they go through
+        # confirmation. ALWAYS_ALLOW_BELOW = LOW means "below LOW", i.e. SAFE only.
         if risk_level.value < self.ALWAYS_ALLOW_BELOW.value:
-            self._record_decision(request, PermissionDecision.GRANTED, "below confirmation threshold")
+            self._record_decision(request, PermissionDecision.GRANTED, "SAFE action — below confirmation threshold")
             return request
 
         # Check trust window for repeatable, non-critical actions.
@@ -330,7 +323,16 @@ class PermissionManager:
         raise PermissionDeniedError(action=action, reason=reason)
 
     def _request_confirmation(self, request: PermissionRequest) -> tuple[PermissionDecision, str]:
-        """Invoke the confirmation callback and interpret its result."""
+        """Invoke the confirmation callback and interpret its result.
+
+        Note on timeout: The elapsed-time check below is post-hoc. It
+        records TIMED_OUT only after the callback has already returned.
+        The callback itself must implement any real-time interrupt
+        (e.g. a dialog that auto-closes after N seconds). A callback
+        that blocks for longer than confirmation_timeout_seconds will
+        still receive a TIMED_OUT decision, but the user interaction
+        has already concluded inside the callback.
+        """
         if self._confirmation_callback is None:
             return (
                 PermissionDecision.DENIED,
@@ -340,7 +342,7 @@ class PermissionManager:
         start = time.monotonic()
         try:
             approved = self._confirmation_callback(request)
-        except Exception as exc:  # noqa: BLE001 - any callback failure must deny, not crash JARVIS
+        except Exception as exc:  # noqa: BLE001
             logger.exception("Confirmation callback raised an exception for action '%s'", request.action)
             return (PermissionDecision.DENIED, f"confirmation callback error: {exc}")
 
@@ -361,13 +363,7 @@ class PermissionManager:
     # ------------------------------------------------------------------
 
     def _trust_key(self, action: str, metadata: dict) -> str:
-        """Build a stable key identifying a specific action+target pair.
-
-        Trust is scoped to the exact action and its metadata (e.g. the
-        specific file path or app name), not to the action type in
-        general. Approving one file deletion must not silently grant
-        trust to delete a different file.
-        """
+        """Build a stable key identifying a specific action+target pair."""
         try:
             metadata_repr = json.dumps(metadata, sort_keys=True, default=str)
         except (TypeError, ValueError):
@@ -403,11 +399,7 @@ class PermissionManager:
     # ------------------------------------------------------------------
 
     def _sanitize_metadata(self, metadata: dict) -> dict:
-        """Ensure metadata is JSON-serializable and strips obvious secrets.
-
-        Keys that look like they hold credentials are redacted before
-        ever reaching the audit log, regardless of caller intent.
-        """
+        """Ensure metadata is JSON-serializable and strips obvious secrets."""
         redacted_keys = {"password", "token", "secret", "api_key", "credential"}
         sanitized: dict = {}
         for key, value in metadata.items():
@@ -430,7 +422,10 @@ class PermissionManager:
         """Append a single decision record to the audit log and app log."""
         record = {
             "request_id": request.request_id,
-            "timestamp": request.requested_at.isoformat() + "Z",
+            # requested_at is now timezone-aware; isoformat() produces
+            # a correct +00:00 suffix. We normalise to the 'Z' form for
+            # consistency with the rest of the JARVIS timestamp convention.
+            "timestamp": request.requested_at.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z",
             "action": request.action,
             "description": request.description,
             "risk_level": request.risk_level.name,
@@ -451,8 +446,6 @@ class PermissionManager:
                 with self._audit_log_path.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(record) + "\n")
         except OSError:
-            # Audit logging failure must never crash the calling
-            # automation flow, but it must be loud in the app log.
             logger.exception("Failed to write permission audit record to %s", self._audit_log_path)
 
     # ------------------------------------------------------------------
@@ -460,11 +453,7 @@ class PermissionManager:
     # ------------------------------------------------------------------
 
     def recent_denials(self, limit: int = 20) -> list[dict]:
-        """Return the most recent denied/timed-out entries from the audit log.
-
-        Useful for a "why was that blocked?" diagnostic command in the
-        conversation manager.
-        """
+        """Return the most recent denied/timed-out entries from the audit log."""
         if not self._audit_log_path.exists():
             return []
 

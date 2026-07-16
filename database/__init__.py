@@ -1,34 +1,20 @@
 """
-jarvis/security/__init__.py
+jarvis/database/__init__.py
 
-Public API surface for the JARVIS security package.
+Public API surface for the JARVIS database package.
 
-Re-exports all symbols needed by automation modules, the communication
-layer, and the orchestrator so that callers use stable import paths.
+Re-exports the symbols needed by all JARVIS subsystems that interact
+with persistent storage, so callers use stable import paths regardless
+of internal module reorganisation.
 
 Correct usage anywhere in JARVIS:
-    from security import PermissionManager, PermissionDeniedError
-    from security import RiskLevel, PermissionDecision, PermissionRequest
-    from security import InputValidator, ValidationError
+    from database import DatabaseManager, DatabaseError
+    from database.models import LongTermFact, ConversationSession
 """
 
-from security.permissions import (
-    PermissionDecision,
-    PermissionDeniedError,
-    PermissionManager,
-    PermissionRequest,
-    RiskLevel,
-)
-from security.validators import InputValidator, ValidationError
+from database.db_manager import DatabaseError, DatabaseManager
 
 __all__ = [
-    # permissions.py
-    "PermissionManager",
-    "PermissionDeniedError",
-    "PermissionRequest",
-    "PermissionDecision",
-    "RiskLevel",
-    # validators.py
-    "InputValidator",
-    "ValidationError",
+    "DatabaseManager",
+    "DatabaseError",
 ]

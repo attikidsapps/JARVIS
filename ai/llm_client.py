@@ -17,9 +17,12 @@ Design goals:
     - Supports both plain conversational chat and structured
       (JSON-constrained) output for the planner/tool-selector stages.
 
-This module depends on the `ollama` Python package, which is a thin
-HTTP client around the locally running Ollama server. It does not
-depend on any paid service.
+API compatibility note:
+    This file targets ollama==0.6.2 (pinned in requirements.txt).
+    The ollama Python client >=0.4.0 returns typed Pydantic response
+    objects (ListResponse, ChatResponse), NOT plain dicts. All
+    attribute access uses the Pydantic model API (response.message.content,
+    response.done, etc.), not dict.get(). Do not revert to dict access.
 """
 
 from __future__ import annotations
@@ -33,7 +36,7 @@ from typing import Any, Iterator, Optional
 try:
     import ollama
     from ollama import ResponseError
-except ImportError as exc:  # pragma: no cover - import guard, not a runtime branch
+except ImportError as exc:  # pragma: no cover
     raise ImportError(
         "The 'ollama' package is required. Install with: pip install ollama\n"
         "Also ensure the Ollama application is installed and running locally "
@@ -79,7 +82,7 @@ class ChatMessage:
     name: Optional[str] = None
 
     def to_dict(self) -> dict[str, str]:
-        payload = {"role": self.role, "content": self.content}
+        payload: dict[str, str] = {"role": self.role, "content": self.content}
         if self.name is not None:
             payload["name"] = self.name
         return payload
@@ -95,16 +98,16 @@ class LLMResponse:
         done: Whether generation completed (vs. truncated).
         total_duration_ms: Total wall-clock time for the call, in
             milliseconds, if reported by Ollama.
-        raw: The raw dict returned by the ollama client, retained for
-            callers that need fields not surfaced here (e.g. token
-            counts for logging/telemetry).
+        raw: The raw Pydantic ChatResponse object returned by the
+            ollama client, for callers that need fields not surfaced
+            here (e.g. token counts). Access via attribute, not dict.
     """
 
     content: str
     model: str
     done: bool
     total_duration_ms: Optional[float] = None
-    raw: dict[str, Any] = field(default_factory=dict)
+    raw: Any = field(default=None)
 
 
 class OllamaClient:
@@ -121,7 +124,6 @@ class OllamaClient:
     For planner output that must be valid JSON:
         plan = client.chat_json(
             messages=[...],
-            schema_hint='{"steps": [{"tool": str, "args": dict}]}',
         )
     """
 
@@ -161,13 +163,18 @@ class OllamaClient:
     def _verify_model_available(self) -> None:
         """Confirm Ollama is reachable and the target model is pulled.
 
+        Uses the Pydantic ListResponse API (ollama>=0.4.0):
+            response.models  → list[ModelInfo]
+            model_info.model → str (e.g. "dolphin-llama3:latest")
+
         Raises:
             ModelUnavailableError: If the Ollama server cannot be
                 reached, or the model is not present locally.
         """
         try:
-            available = self._client.list()
-        except Exception as exc:  # noqa: BLE001 - any connection failure maps to our typed error
+            # ollama>=0.4.0: returns ListResponse, not a plain dict.
+            list_response = self._client.list()
+        except Exception as exc:  # noqa: BLE001
             raise ModelUnavailableError(
                 f"Could not reach Ollama server at {self.host}. "
                 "Ensure the Ollama application is running (it must be "
@@ -175,10 +182,21 @@ class OllamaClient:
                 "desktop app or `ollama serve`)."
             ) from exc
 
-        model_names = {entry.get("model", entry.get("name", "")) for entry in available.get("models", [])}
-        # Ollama tags may or may not include the ":latest" suffix depending
-        # on version, so match on prefix rather than exact string.
-        if not any(name == self.model or name.startswith(f"{self.model}:") for name in model_names):
+        # list_response.models is a list of ModelInfo Pydantic objects.
+        # Each has a .model attribute (the full tag, e.g. "dolphin-llama3:latest")
+        # and a .name attribute (alias for .model in some versions).
+        model_names: set[str] = set()
+        for entry in list_response.models:
+            # .model is the canonical attribute in ollama>=0.4.0
+            tag = getattr(entry, "model", None) or getattr(entry, "name", "") or ""
+            model_names.add(tag)
+
+        # Match on prefix to handle ":latest" suffix variations.
+        found = any(
+            name == self.model or name.startswith(f"{self.model}:")
+            for name in model_names
+        )
+        if not found:
             raise ModelUnavailableError(
                 f"Model '{self.model}' is not available locally. "
                 f"Pull it first with: ollama pull {self.model}"
@@ -200,19 +218,20 @@ class OllamaClient:
     ) -> LLMResponse:
         """Send a chat completion request to dolphin-llama3.
 
+        Uses the Pydantic ChatResponse API (ollama>=0.4.0):
+            result.message.content  → str
+            result.done             → bool
+            result.model            → str
+            result.total_duration   → int (nanoseconds, may be None)
+
         Args:
             messages: Ordered conversation history, oldest first.
-                Should typically start with a system message defining
-                JARVIS's personality (see ai/personality.py).
-            temperature: Sampling temperature. Lower is more
-                deterministic; use lower values (~0.2-0.4) for planner
-                calls and higher (~0.6-0.8) for conversational replies.
+            temperature: Sampling temperature.
             top_p: Nucleus sampling parameter.
             max_tokens: Optional cap on generated tokens (maps to
                 Ollama's `num_predict`). None lets the model decide.
             format_json: If True, instructs Ollama to constrain output
-                to valid JSON. Use for planner/tool-selection calls,
-                not for conversational responses.
+                to valid JSON. Use for planner/tool-selection calls.
 
         Returns:
             LLMResponse containing the assistant's reply.
@@ -230,6 +249,7 @@ class OllamaClient:
         for attempt in range(1, self.max_retries + 1):
             try:
                 start = time.monotonic()
+                # ollama>=0.4.0: returns ChatResponse (Pydantic model), not dict.
                 result = self._client.chat(
                     model=self.model,
                     messages=payload_messages,
@@ -239,21 +259,29 @@ class OllamaClient:
                 )
                 elapsed_ms = (time.monotonic() - start) * 1000
 
-                message = result.get("message", {})
+                # Access Pydantic attributes, not dict keys.
+                content: str = result.message.content or ""
+                model_name: str = result.model or self.model
+                done: bool = bool(result.done)
+
+                # total_duration is in nanoseconds; convert to milliseconds.
+                total_ns: Optional[int] = getattr(result, "total_duration", None)
+                total_ms = (total_ns / 1_000_000) if total_ns is not None else elapsed_ms
+
                 return LLMResponse(
-                    content=message.get("content", ""),
-                    model=result.get("model", self.model),
-                    done=result.get("done", True),
-                    total_duration_ms=result.get("total_duration", elapsed_ms * 1_000_000) / 1_000_000
-                    if "total_duration" in result else elapsed_ms,
-                    raw=result,
+                    content=content,
+                    model=model_name,
+                    done=done,
+                    total_duration_ms=total_ms,
+                    raw=result,  # Pydantic ChatResponse — access via attributes
                 )
+
             except ResponseError as exc:
-                # Model-level errors (bad request, model not found mid-session)
-                # are not transient -- retrying won't help.
+                # Model-level errors are not transient.
                 logger.error("Ollama returned a response error: %s", exc)
                 raise ModelUnavailableError(f"Ollama response error: {exc}") from exc
-            except Exception as exc:  # noqa: BLE001 - connection resets, timeouts, etc.
+
+            except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 logger.warning(
                     "Chat request failed (attempt %d/%d): %s",
@@ -274,9 +302,9 @@ class OllamaClient:
     ) -> Iterator[str]:
         """Stream a chat completion token-by-token for low-latency TTS.
 
-        Yields incremental content chunks as they arrive from Ollama,
-        allowing response_generator.py to begin text-to-speech before
-        the full reply has finished generating.
+        Yields incremental content chunks as they arrive from Ollama.
+        Each chunk is a ChatResponse object (ollama>=0.4.0); content is
+        accessed via chunk.message.content (not dict-style .get()).
 
         Args:
             messages: Ordered conversation history.
@@ -284,14 +312,15 @@ class OllamaClient:
             top_p: Nucleus sampling parameter.
 
         Yields:
-            str: Incremental content chunks.
+            str: Incremental content chunks (may be empty strings on
+                 heartbeat chunks — callers should filter falsy values).
 
         Raises:
             ModelUnavailableError: If the stream fails to start or is
                 interrupted by a connection error.
         """
         payload_messages = [m.to_dict() for m in messages]
-        options = {"temperature": temperature, "top_p": top_p}
+        options: dict[str, Any] = {"temperature": temperature, "top_p": top_p}
 
         try:
             stream = self._client.chat(
@@ -301,7 +330,9 @@ class OllamaClient:
                 stream=True,
             )
             for chunk in stream:
-                content = chunk.get("message", {}).get("content", "")
+                # ollama>=0.4.0: each chunk is a ChatResponse Pydantic object.
+                # chunk.message is a Message object; .content is the text delta.
+                content: str = chunk.message.content or ""
                 if content:
                     yield content
         except Exception as exc:  # noqa: BLE001
@@ -322,20 +353,15 @@ class OllamaClient:
 
         Intended for core/planner.py and core/tool_selector.py, where
         the model must return a structured plan or tool-call payload
-        rather than free-form conversational text. Uses a low default
-        temperature since structured output benefits from determinism.
+        rather than free-form conversational text.
 
         Args:
             messages: Conversation history. The final system or user
                 message should explicitly instruct the model to
-                respond with JSON matching the expected schema --
-                this function does not inject that instruction itself,
-                since the exact schema is caller-specific.
-            temperature: Sampling temperature (default low for
+                respond with JSON matching the expected schema.
+            temperature: Sampling temperature (low default for
                 structured output).
-            max_retries_on_parse_failure: If the model returns text
-                that isn't valid JSON, retry up to this many times
-                with a corrective follow-up message before raising.
+            max_retries_on_parse_failure: Retry count on invalid JSON.
 
         Returns:
             The parsed JSON object as a dict.
@@ -374,5 +400,5 @@ class OllamaClient:
                         f"Last output: {response.content[:500]!r}"
                     ) from exc
 
-        # Unreachable, but keeps type checkers satisfied.
+        # Unreachable, but satisfies type checkers.
         raise LLMClientError("chat_json exhausted retries without returning or raising.")
