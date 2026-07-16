@@ -10,7 +10,7 @@ routes each voice command through the full pipeline:
     → ToolSelector → PermissionManager → ToolExecutor
     → ResponseGenerator → TextToSpeech
 
-Design goals:
+Design goals:   
     - Dependency injection over global state: every subsystem is
       passed into the constructor rather than imported and instantiated
       here. This makes each subsystem independently testable and
